@@ -1,23 +1,26 @@
 from dotenv import load_dotenv
 load_dotenv()
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import google.generativeai as genai
 
+# Qdrant Cloud client
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
-# CORRECTED IMPORT: Use the new, unique name
-from vector_store import qdrant_db_client, COLLECTION_NAME, init_collection 
+# -----------------------------
+# Initialize Qdrant Cloud
+# -----------------------------
+QDRANT_URL = os.getenv("QDRANT_HOST")  # Your cloud URL
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
-# INIT COLLECTION FIRST
-init_collection()
+COLLECTION_NAME = "book_embeddings"  # Your hosted collection
+VECTOR_NAME = "default"              # Use default 768 vector
 
-# RENAME THE INSTANCE USED IN THE CODE
-# For consistency and debugging, let's keep the name simple here
-qdrant_client_instance = qdrant_db_client
-
+qdrant_client_instance = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 print("Type of qdrant object:", type(qdrant_client_instance))
-
 
 # Gemini free model
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
@@ -35,7 +38,7 @@ app.add_middleware(
 )
 
 # -----------------------------
-# RAG Pipeline (Local Qdrant)
+# RAG Pipeline (Qdrant Cloud)
 # -----------------------------
 async def rag_query(user_question: str, selected_text: str = ""):
     print("\nQUESTION:", user_question)
@@ -53,24 +56,24 @@ async def rag_query(user_question: str, selected_text: str = ""):
         print("Embedding error:", e)
         return "Embedding failed."
 
+    # Query Qdrant Cloud
+    # Query Qdrant Cloud
     try:
         hits = qdrant_client_instance.query_points(
             collection_name=COLLECTION_NAME,
-            query=user_vector,
-            # using="dense",
             limit=3
         )
-        print(f"Qdrant hits: {hits}")
+        print("Qdrant hits:", hits)
     except Exception as e:
         print("Qdrant search error:", e)
         return "Qdrant search failed."
 
-    
 
+    # Extract text context
     context = []
     for h in hits.points:
         if h.payload and "text" in h.payload:
-            context.append(h.payload["text"])
+            context.append(h.payload.get("text", ""))
 
     print(f"Extracted context: {context}")
 
@@ -93,24 +96,13 @@ Question: {user_question}
 
 Answer:
 """
-    
-
-    # ... (Prompt is generated) ...
-
     try:
-        # 1. Use the synchronous call (no await)
         reply = chat_model.generate_content(prompt)
-        
-        # 2. Check if the response was blocked for safety reasons
         if not reply.candidates:
-            # Check the finish reason of the first candidate (if available)
             finish_reason = reply.prompt_feedback.block_reason.name if reply.prompt_feedback.block_reason else "UNKNOWN"
             print(f"Gemini Safety Block: {finish_reason}")
             return f"The response was blocked by the safety filter (Reason: {finish_reason})."
-        
-        # If not blocked, return the text
         return reply.text
-        
     except Exception as e:
         print("Gemini error:", e)
         return "Failed to generate answer."
@@ -129,7 +121,6 @@ async def chat(req: Request):
 
     answer = await rag_query(question, selected_text)
     return {"reply": answer}
-
 
 @app.get("/")
 async def root():
