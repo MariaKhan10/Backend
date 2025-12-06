@@ -5,123 +5,112 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import google.generativeai as genai
-
-# Qdrant Cloud client
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
 # -----------------------------
 # Initialize Qdrant Cloud
 # -----------------------------
-QDRANT_URL = os.getenv("QDRANT_HOST")  # Your cloud URL
+QDRANT_URL = os.getenv("QDRANT_HOST")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+COLLECTION_NAME = "book_embeddings"
 
-COLLECTION_NAME = "book_embeddings"  # Your hosted collection
-VECTOR_NAME = "default"              # Use default 768 vector
+qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+print("Connected to Qdrant")
 
-qdrant_client_instance = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-print("Type of qdrant object:", type(qdrant_client_instance))
-
-# Gemini free model
+# -----------------------------
+# Gemini models
+# -----------------------------
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-chat_model = genai.GenerativeModel("gemini-2.0-flash")
 EMBED_MODEL = "models/text-embedding-004"
+LLM = genai.GenerativeModel("gemini-2.0-flash")
 
+# -----------------------------
+# FastAPI setup
+# -----------------------------
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],        # Allow all origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -----------------------------
-# RAG Pipeline (Qdrant Cloud)
+# RAG + fallback pipeline
 # -----------------------------
-async def rag_query(user_question: str, selected_text: str = ""):
-    print("\nQUESTION:", user_question)
+async def rag_query(question: str, selected_text: str = ""):
+    print("\nQUESTION:", question)
 
-    # Create embedding
     try:
+        # ---------- 1. Create embedding ----------
         emb = genai.embed_content(
             model=EMBED_MODEL,
-            content=user_question,
-            task_type="retrieval_document"
+            content=question
         )
         user_vector = emb["embedding"]
-        print("Embedding OK:", len(user_vector))
-    except Exception as e:
-        print("Embedding error:", e)
-        return "Embedding failed."
+        print("Embedding generated:", len(user_vector))
 
-    # Query Qdrant Cloud
-    # Query Qdrant Cloud
-    try:
-        hits = qdrant_client_instance.query_points(
+        # ---------- 2. Query Qdrant ----------
+        hits = qdrant.query_points(
             collection_name=COLLECTION_NAME,
+            query=user_vector,
             limit=3
         )
         print("Qdrant hits:", hits)
+
+        # ---------- 3. Extract context ----------
+        context = []
+        for point in hits.points:
+            text = point.payload.get("text", "")
+            if text:
+                context.append(text)
+
+        if selected_text:
+            context.insert(0, f"User selected: {selected_text}")
+
+        full_context = "\n\n".join(context) if context else "No relevant context."
+
     except Exception as e:
-        print("Qdrant search error:", e)
-        return "Qdrant search failed."
+        # ---------- FALLBACK ----------
+        print("Embedding/Qdrant error:", e)
+        full_context = selected_text if selected_text else "No relevant context."
+        print("Fallback: Using LLM directly without embedding/Qdrant.")
 
-
-    # Extract text context
-    context = []
-    for h in hits.points:
-        if h.payload and "text" in h.payload:
-            context.append(h.payload.get("text", ""))
-
-    print(f"Extracted context: {context}")
-
-    full_context_list = []
-    if selected_text:
-        full_context_list.append(f"User selected text: {selected_text}")
-    if context:
-        full_context_list.extend(context)
-
-    full_context_str = "\n\n".join(full_context_list) if full_context_list else "No relevant context found."
-
-    # Generate answer
+    # ---------- 4. Generate answer ----------
     prompt = f"""
 Use ONLY the following context to answer.
 
 Context:
-{full_context_str}
+{full_context}
 
-Question: {user_question}
+Question: {question}
 
 Answer:
 """
     try:
-        reply = chat_model.generate_content(prompt)
-        if not reply.candidates:
-            finish_reason = reply.prompt_feedback.block_reason.name if reply.prompt_feedback.block_reason else "UNKNOWN"
-            print(f"Gemini Safety Block: {finish_reason}")
-            return f"The response was blocked by the safety filter (Reason: {finish_reason})."
+        reply = LLM.generate_content(prompt)
         return reply.text
     except Exception as e:
-        print("Gemini error:", e)
+        print("LLM error:", e)
         return "Failed to generate answer."
 
 # -----------------------------
-# API ENDPOINTS
+# API endpoints
 # -----------------------------
 @app.post("/chat")
 async def chat(req: Request):
-    body = await req.json()
-    question = body.get("message", "")
-    selected_text = body.get("selected_text", "")
+    data = await req.json()
+    msg = data.get("message", "")
+    selected = data.get("selected_text", "")
 
-    if not question:
+    if not msg:
         return {"reply": "Message is empty."}
 
-    answer = await rag_query(question, selected_text)
+    answer = await rag_query(msg, selected)
     return {"reply": answer}
 
 @app.get("/")
-async def root():
-    return {"message": "Backend running!"}
+async def home():
+    return {"message": "Backend OK"}
