@@ -22,7 +22,7 @@ print("Connected to Qdrant")
 # -----------------------------
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 EMBED_MODEL = "models/text-embedding-004"
-LLM = genai.GenerativeModel("gemini-2.0-flash")
+LLM = genai.GenerativeModel("gemini-2.5-flash-lite")
 
 # -----------------------------
 # FastAPI setup
